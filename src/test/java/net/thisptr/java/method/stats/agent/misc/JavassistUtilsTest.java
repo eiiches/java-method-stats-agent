@@ -9,7 +9,7 @@ import javassist.ClassPool;
 import javassist.CtClass;
 import javassist.CtMethod;
 import javassist.NotFoundException;
-import net.thisptr.java.method.stats.agent.cofig.MethodName;
+import net.thisptr.java.method.stats.agent.config.MethodName;
 import net.thisptr.java.method.stats.agent.misc.JavassistUtils.AmbiguousMethodNameException;
 import net.thisptr.java.method.stats.agent.misc.JavassistUtils.MethodNotFoundException;
 

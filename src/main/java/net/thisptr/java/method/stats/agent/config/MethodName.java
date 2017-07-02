@@ -1,4 +1,4 @@
-package net.thisptr.java.method.stats.agent.cofig;
+package net.thisptr.java.method.stats.agent.config;
 
 import java.util.ArrayList;
 import java.util.List;

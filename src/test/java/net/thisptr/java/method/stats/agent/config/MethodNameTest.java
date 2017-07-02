@@ -1,10 +1,12 @@
-package net.thisptr.java.method.stats.agent.cofig;
+package net.thisptr.java.method.stats.agent.config;
 
 import static org.junit.Assert.assertEquals;
 
 import java.util.Arrays;
 
 import org.junit.Test;
+
+import net.thisptr.java.method.stats.agent.config.MethodName;
 
 public class MethodNameTest {
 	@Test

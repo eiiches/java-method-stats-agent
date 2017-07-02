@@ -3,7 +3,7 @@ package net.thisptr.java.method.stats.agent.misc;
 import javassist.CtClass;
 import javassist.CtMethod;
 import javassist.NotFoundException;
-import net.thisptr.java.method.stats.agent.cofig.MethodName;
+import net.thisptr.java.method.stats.agent.config.MethodName;
 
 public class JavassistUtils {
 
