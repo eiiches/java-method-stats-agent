@@ -1,0 +1,12 @@
+instruments:
+  - method: org.apache.hadoop.hbase.regionserver.RSRpcServices.scan(com.google.protobuf.RpcController, org.apache.hadoop.hbase.protobuf.generated.ClientProtos$ScanRequest)
+    jmx:
+      domain: Hadoop
+      keys:
+        service: HBase
+        name: RegionServer
+        sub: Server
+        metrics: ScannerCount
+    event: ON_RETURN
+    type: GAUGE_LONG
+    value: $0.scanners.size()

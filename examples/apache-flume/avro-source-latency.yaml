@@ -1,0 +1,17 @@
+instruments:
+  - method: org.apache.flume.source.AvroSource.append(org.apache.flume.source.avro.AvroFlumeEvent)
+    jmx:
+      domain: org.apache.flume.source
+      keys:
+        type: ${$jmx.sanitize($0.getName())}
+        method: append
+    event: ON_RETURN
+    type: TIMER
+  - method: org.apache.flume.source.AvroSource.appendBatch(java.util.List)
+    jmx:
+      domain: org.apache.flume.source
+      keys:
+        type: ${$jmx.sanitize($0.getName())}
+        method: appendBatch
+    event: ON_RETURN
+    type: TIMER

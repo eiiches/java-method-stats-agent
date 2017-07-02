@@ -1,0 +1,23 @@
+instruments:
+  - method: org.apache.hadoop.hbase.regionserver.HRegion.increment(org.apache.hadoop.hbase.client.Increment, long, long)
+    jmx:
+      domain: Hadoop
+      keys:
+        service: HBase
+        name: RegionServer
+        sub: Tables
+        table: ${$jmx.sanitize($0.htableDescriptor.getTableName().getNameAsString())}
+        metric: IncrementTime
+    event: ON_RETURN
+    type: TIMER
+  - method: org.apache.hadoop.hbase.regionserver.HRegion.get(org.apache.hadoop.hbase.client.Get)
+    jmx:
+      domain: Hadoop
+      keys:
+        service: HBase
+        name: RegionServer
+        sub: Tables
+        table: ${$jmx.sanitize($0.htableDescriptor.getTableName().getNameAsString())}
+        metric: GetTime
+    event: ON_RETURN
+    type: TIMER
