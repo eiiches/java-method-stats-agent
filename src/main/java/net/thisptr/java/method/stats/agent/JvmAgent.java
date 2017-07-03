@@ -9,6 +9,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
@@ -22,18 +23,19 @@ import javassist.NotFoundException;
 import net.thisptr.java.method.stats.agent.config.JvmAgentConfig;
 import net.thisptr.java.method.stats.agent.config.JvmAgentConfig.InstrumentConfig;
 import net.thisptr.java.method.stats.agent.config.JvmAgentConfig.InstrumentConfig.CacheScope;
-import net.thisptr.java.method.stats.agent.config.JvmAgentConfig.InstrumentConfig.InstrumentType;
 import net.thisptr.java.method.stats.agent.config.JvmAgentConfig.InstrumentConfig.JmxObjectName;
-import net.thisptr.java.method.stats.agent.mbeans.JmxCounter;
-import net.thisptr.java.method.stats.agent.mbeans.JmxDoubleGauge;
-import net.thisptr.java.method.stats.agent.mbeans.JmxHistogram;
-import net.thisptr.java.method.stats.agent.mbeans.JmxLongGauge;
-import net.thisptr.java.method.stats.agent.mbeans.JmxMeter;
-import net.thisptr.java.method.stats.agent.mbeans.JmxTimer;
-import net.thisptr.java.method.stats.agent.metrics.Metrics;
+import net.thisptr.java.method.stats.agent.config.MethodName;
 import net.thisptr.java.method.stats.agent.misc.Java;
 import net.thisptr.java.method.stats.agent.misc.JavassistUtils;
 import net.thisptr.java.method.stats.agent.misc.ObjectNameUtils;
+import net.thisptr.java.method.stats.agent.registry.MetricRegistry;
+import net.thisptr.java.method.stats.agent.templates.CodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.CounterCodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.DoubleGaugeCodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.HistogramCodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.LongGaugeCodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.MeterCodeTemplate;
+import net.thisptr.java.method.stats.agent.templates.TimerCodeTemplate;
 
 public class JvmAgent {
 
@@ -68,7 +70,33 @@ public class JvmAgent {
 
 					for (final InstrumentConfig instrument : methodInstruments) {
 						try {
-							instrumentMethod(cp, clazz, instrument);
+
+							final CodeTemplate code;
+							switch (instrument.type) {
+								case COUNTER:
+									code = new CounterCodeTemplate(instrument.value);
+									break;
+								case GAUGE_DOUBLE:
+									code = new DoubleGaugeCodeTemplate(instrument.value);
+									break;
+								case GAUGE_LONG:
+									code = new LongGaugeCodeTemplate(instrument.value);
+									break;
+								case HISTOGRAM:
+									code = new HistogramCodeTemplate(instrument.value);
+									break;
+								case METER:
+									code = new MeterCodeTemplate(instrument.value);
+									break;
+								case TIMER:
+									code = new TimerCodeTemplate();
+									break;
+								default:
+									throw new RuntimeException("not implemented");
+							}
+
+							new DefaultMethodInstrumentation(instrument, code).instrument(cp, clazz, instrument.method);
+
 						} catch (final Exception e) {
 							e.printStackTrace(); // FIXME
 						}
@@ -83,14 +111,6 @@ public class JvmAgent {
 				}
 			}
 		});
-	}
-
-	private static String constructFieldAccess(final CtField field) {
-		if ((field.getModifiers() & Modifier.STATIC) > 0) {
-			return Java.FieldAccess(field.getDeclaringClass().getName(), field.getName());
-		} else {
-			return Java.FieldAccess("$0", field.getName());
-		}
 	}
 
 	private static String constructGetMetricsExpression(final JmxObjectName name, final Class<?> metricsClass) {
@@ -111,166 +131,161 @@ public class JvmAgent {
 		});
 		if (!dynamic.get()) {
 			// if name is static, pre-register the mxbean.
-			Metrics.getMetrics(metricsClass, name.domain, keyvalues.toArray(new String[keyvalues.size()]));
+			MetricRegistry.get(metricsClass, name.domain, keyvalues.toArray(new String[keyvalues.size()]));
 		}
-		return Java.Cast(metricsClass.getName(), Java.FunctionCall(Metrics.class.getName(), "getMetrics", Arrays.asList(new String[] {
+		return Java.Cast(metricsClass.getName(), Java.FunctionCall(MetricRegistry.class.getName(), "get", Arrays.asList(new String[] {
 				metricsClass.getName() + ".class",
 				Java.StringLiteral(name.domain),
 				Java.NewArrayWithInitializer("String", keyvalueExprs),
 		})));
 	}
 
-	public static void instrumentMethod(final ClassPool cp, final CtClass clazz, final InstrumentConfig instrument) throws CannotCompileException, NotFoundException {
-		final CtMethod method = JavassistUtils.findMethod(clazz, instrument.method);
-		if (method == null) {
-			System.err.println("Cannot find method: " + instrument.method);
-			return;
+	public static interface MethodInstrument {
+		void instrument(ClassPool cp, CtClass clazz, MethodName method) throws Exception;
+	}
+
+	public static class DefaultMethodInstrumentation implements MethodInstrument {
+		private CodeTemplate code;
+		private InstrumentConfig config;
+
+		public DefaultMethodInstrumentation(final InstrumentConfig config, final CodeTemplate code) {
+			this.code = code;
+			this.config = config;
 		}
-		System.err.println(instrument.method);
 
-		CtField cacheField = null;
-		Class<?> metricsClass = null;
-		if (instrument.cacheScope != null) {
+		public static class Snippet {
+			public static class LocalVariable {
+				public final String name;
+				public final String type;
 
-			switch (instrument.type) {
-				case COUNTER:
-					metricsClass = JmxCounter.class;
+				public LocalVariable(final String type, final String name) {
+					this.type = type;
+					this.name = name;
+				}
+			}
+
+			public static class ClassField {
+				public final String type;
+				public final String name;
+				public final int modifiers;
+
+				public ClassField(final String type, final String name, final int modifiers) {
+					this.type = type;
+					this.name = name;
+					this.modifiers = modifiers;
+				}
+			}
+
+			public final List<ClassField> fields;
+			public final List<LocalVariable> locals;
+			public final String source;
+
+			public Snippet(final String source, final List<ClassField> fields, final List<LocalVariable> locals) {
+				this.source = source;
+				this.fields = fields;
+				this.locals = locals;
+			}
+		}
+
+		public Snippet render() {
+			final List<Snippet.ClassField> fields = new ArrayList<>();
+			final List<Snippet.LocalVariable> locals = new ArrayList<>();
+
+			final String uuid = UUID.randomUUID().toString().replaceAll("-", "");
+
+			// FIXME: avoid adding static fields on user classes
+			fields.add(new Snippet.ClassField("boolean", "$$e_" + uuid, Modifier.STATIC));
+			final String suppressErrorRef = "$0.$$e_" + uuid;
+
+			final StringBuilder source = new StringBuilder();
+			source.append("try {\n");
+			if (config.condition != null) {
+				source.append("    if (" + config.condition + ") {\n");
+			}
+			if (config.cacheScope != null) {
+				final String instanceRef = "$0.$$m_" + uuid;
+				fields.add(new Snippet.ClassField(code.clazz().getName(), "$$m_" + uuid, config.cacheScope == CacheScope.CLASS ? Modifier.STATIC : 0));
+				source.append("        if (" + instanceRef + " == null)\n");
+				source.append("            " + instanceRef + " = " + constructGetMetricsExpression(config.jmx, code.clazz()) + ";\n");
+				source.append("        " + code.create(instanceRef) + "\n");
+			} else {
+				final String instanceRef = "$$m_" + uuid;
+				locals.add(new Snippet.LocalVariable(code.clazz().getName(), instanceRef));
+				source.append("        " + instanceRef + " = " + constructGetMetricsExpression(config.jmx, code.clazz()) + ";");
+				source.append("        " + code.create(instanceRef) + "\n");
+			}
+			if (config.condition != null) {
+				source.append("    }\n");
+			}
+			source.append("} catch (Throwable th) {\n");
+			source.append("    if (!" + suppressErrorRef + ") {\n");
+			source.append("        th.printStackTrace();\n");
+			source.append("        " + suppressErrorRef + " = true;\n");
+			source.append("    }\n");
+			source.append("}\n");
+
+			return new Snippet(source.toString(), fields, locals);
+		}
+
+		@Override
+		public void instrument(final ClassPool cp, final CtClass clazz, final MethodName methodName) throws CannotCompileException, NotFoundException {
+
+			final CtMethod method = JavassistUtils.findMethod(clazz, methodName);
+			if (method == null) {
+				System.err.println("Cannot find method: " + methodName);
+				return;
+			}
+			System.err.println(methodName);
+
+			final StringBuilder beforeBody = new StringBuilder();
+			final StringBuilder afterBody = new StringBuilder();
+			final StringBuilder catchBody = new StringBuilder();
+
+			final Snippet snippet = render();
+
+			// create necessary fields
+			for (final Snippet.ClassField field : snippet.fields) {
+				final CtField f = new CtField(cp.get(field.type), field.name, clazz);
+				f.setModifiers(field.modifiers);
+				clazz.addField(f);
+			}
+			// create necessary local variables
+			for (final Snippet.LocalVariable local : snippet.locals) {
+				method.addLocalVariable(local.name, cp.get(local.type));
+			}
+
+			if (snippet.source.contains("$time0")) {
+				method.addLocalVariable("$time0", CtClass.longType);
+				beforeBody.append("$time0 = System.nanoTime();");
+			}
+
+			switch (config.event) {
+				case ON_ENTER:
+					beforeBody.append(snippet.source);
 					break;
-				case HISTOGRAM:
-					metricsClass = JmxHistogram.class;
+				case ON_RETURN:
+					afterBody.append(snippet.source);
 					break;
-				case METER:
-					metricsClass = JmxMeter.class;
-					break;
-				case TIMER:
-					metricsClass = JmxTimer.class;
-					break;
-				case GAUGE_LONG:
-					metricsClass = JmxLongGauge.class;
-					break;
-				case GAUGE_DOUBLE:
-					metricsClass = JmxDoubleGauge.class;
+				case ON_EXCEPTION:
+					catchBody.append(snippet.source);
+					catchBody.append("throw $th;");
 					break;
 				default:
-					break;
+					throw new RuntimeException("not implemented");
 			}
 
-			if (metricsClass != null) {
-				final String fieldName = "_m_" + System.identityHashCode(instrument);
-				final CtField field = new CtField(cp.get(metricsClass.getName()), fieldName, clazz);
-				if (instrument.cacheScope == CacheScope.CLASS)
-					field.setModifiers(Modifier.STATIC);
-				clazz.addField(field);
-				cacheField = field;
+			if (beforeBody.length() > 0) {
+				System.err.println("BEFORE " + methodName + ": \n" + beforeBody.toString());
+				method.insertBefore(beforeBody.toString());
 			}
-		}
-
-		final String errorFieldName = "_e_" + System.identityHashCode(instrument);
-		final CtField errorField = new CtField(cp.get("boolean"), errorFieldName, clazz);
-		errorField.setModifiers(Modifier.STATIC);
-		clazz.addField(errorField);
-
-		String methodName = null;
-		List<String> methodArgs = null;
-		switch (instrument.type) {
-			case COUNTER:
-				methodName = "inc";
-				methodArgs = instrument.value != null
-						? Arrays.asList(instrument.value)
-						: Arrays.asList("1L");
-				break;
-			case HISTOGRAM:
-				methodName = "update";
-				methodArgs = instrument.value != null
-						? Arrays.asList(instrument.value)
-						: Arrays.asList("1L");
-				break;
-			case METER:
-				methodName = "mark";
-				methodArgs = instrument.value != null
-						? Arrays.asList(instrument.value)
-						: Arrays.asList("1L");
-				break;
-			case TIMER:
-				methodName = "update";
-				methodArgs = Arrays.asList("System.nanoTime() - $time0", "java.util.concurrent.TimeUnit.NANOSECONDS");
-				break;
-			case GAUGE_LONG:
-				methodName = "set";
-				methodArgs = instrument.value != null
-						? Arrays.asList(instrument.value)
-						: Arrays.asList("0L");
-			case GAUGE_DOUBLE:
-				methodName = "set";
-				methodArgs = instrument.value != null
-						? Arrays.asList(instrument.value)
-						: Arrays.asList("0.0");
-			default:
-				break;
-		}
-
-		final StringBuilder instrumentBody = new StringBuilder();
-
-		final StringBuilder beforeBody = new StringBuilder();
-		final StringBuilder afterBody = new StringBuilder();
-		final StringBuilder catchBody = new StringBuilder();
-
-		if (instrument.type == InstrumentType.TIMER
-				|| (instrument.condition != null && instrument.condition.contains("$time0"))
-				|| methodArgs.stream().anyMatch(arg -> arg.contains("$time0"))) {
-			method.addLocalVariable("$time0", CtClass.longType);
-			beforeBody.append("$time0 = System.nanoTime();");
-		}
-
-		instrumentBody.append("try {\n");
-
-		if (instrument.condition != null) {
-			instrumentBody.append("if (" + instrument.condition + ") {");
-		}
-		if (cacheField != null) {
-			instrumentBody.append(Java.IfStatement(Java.BinaryOperator(constructFieldAccess(cacheField), "==", Java.Null()),
-					Java.Statement(Java.Assignment(constructFieldAccess(cacheField), constructGetMetricsExpression(instrument.jmx, metricsClass)))));
-			instrumentBody.append(Java.Statement(Java.FunctionCall(constructFieldAccess(cacheField), methodName, methodArgs)));
-		} else {
-			instrumentBody.append(Java.Statement(Java.FunctionCall(constructGetMetricsExpression(instrument.jmx, metricsClass), methodName, methodArgs)));
-		}
-		if (instrument.condition != null) {
-			instrumentBody.append("}");
-		}
-
-		instrumentBody.append("} catch (Throwable th) {\n");
-		instrumentBody.append("    if (!$0." + errorField.getName() + ") {\n");
-		instrumentBody.append("        th.printStackTrace();\n");
-		instrumentBody.append("        $0." + errorField.getName() + " = true;\n");
-		instrumentBody.append("    }\n");
-		instrumentBody.append("}\n");
-
-		switch (instrument.event) {
-			case ON_ENTER:
-				beforeBody.append(instrumentBody.toString());
-				break;
-			case ON_RETURN:
-				afterBody.append(instrumentBody.toString());
-				break;
-			case ON_EXCEPTION:
-				catchBody.append(instrumentBody.toString());
-				catchBody.append("throw $th;");
-				break;
-			default:
-				throw new RuntimeException("not implemented");
-		}
-
-		if (beforeBody.length() > 0) {
-			System.err.println("BEFORE " + instrument.method.toString() + ": " + beforeBody.toString());
-			method.insertBefore(beforeBody.toString());
-		}
-		if (afterBody.length() > 0) {
-			System.err.println("AFTER " + instrument.method.toString() + ": " + afterBody.toString());
-			method.insertAfter(afterBody.toString());
-		}
-		if (catchBody.length() > 0) {
-			System.err.println("CATCH " + instrument.method.toString() + ": " + catchBody.toString());
-			method.addCatch(catchBody.toString(), cp.get("java.lang.Throwable"), "$th");
+			if (afterBody.length() > 0) {
+				System.err.println("AFTER " + methodName + ": \n" + afterBody.toString());
+				method.insertAfter(afterBody.toString());
+			}
+			if (catchBody.length() > 0) {
+				System.err.println("CATCH " + methodName + ": \n" + catchBody.toString());
+				method.addCatch(catchBody.toString(), cp.get("java.lang.Throwable"), "$th");
+			}
 		}
 	}
 
