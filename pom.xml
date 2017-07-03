@@ -10,7 +10,7 @@
 	<artifactId>java-method-stats-agent</artifactId>
 	<name>Java Method Stats Agent</name>
 	<packaging>jar</packaging>
-	<version>0.0.6-SNAPSHOT</version>
+	<version>0.0.1-SNAPSHOT</version>
 	<description>Java agent for collecting and exposing method statistics via JMX</description>
 	<url>https://github.com/eiiches/java-method-stats-agent</url>
 
