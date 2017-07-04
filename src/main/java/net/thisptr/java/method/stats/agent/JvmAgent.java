@@ -246,7 +246,7 @@ public class JvmAgent {
 			// create necessary fields
 			for (final Snippet.ClassField field : snippet.fields) {
 				final CtField f = new CtField(cp.get(field.type), field.name, clazz);
-				f.setModifiers(field.modifiers);
+				f.setModifiers(field.modifiers | Modifier.TRANSIENT);
 				clazz.addField(f);
 			}
 			// create necessary local variables
