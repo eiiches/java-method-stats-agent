@@ -3,6 +3,7 @@ package net.thisptr.java.method.stats.agent;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.IllegalClassFormatException;
 import java.lang.instrument.Instrumentation;
+import java.lang.reflect.Array;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -11,11 +12,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import javassist.CannotCompileException;
 import javassist.ClassPool;
 import javassist.CtClass;
+import javassist.CtConstructor;
 import javassist.CtField;
 import javassist.CtMethod;
 import javassist.Modifier;
@@ -227,6 +230,16 @@ public class JvmAgent {
 			return new Snippet(source.toString(), fields, locals);
 		}
 
+		private static class MoreArrays {
+			public static <T> T[] append(final T[] head, final T... tail) {
+				@SuppressWarnings("unchecked")
+				final T[] items = (T[]) Array.newInstance(head.getClass().getComponentType(), head.length + tail.length);
+				System.arraycopy(head, 0, items, 0, head.length);
+				System.arraycopy(tail, 0, items, head.length, tail.length);
+				return items;
+			}
+		}
+
 		@Override
 		public void instrument(final ClassPool cp, final CtClass clazz, final MethodName methodName) throws CannotCompileException, NotFoundException {
 
@@ -269,6 +282,65 @@ public class JvmAgent {
 				case ON_EXCEPTION:
 					catchBody.append(snippet.source);
 					catchBody.append("throw $th;");
+					break;
+				case ON_COMPLETABLE_FUTURE_COMPLETE: {
+					final String uuid = UUID.randomUUID().toString().replaceAll("-", "");
+
+					final CtClass[] params = method.getParameterTypes();
+
+					final CtClass[] ctorParams = MoreArrays.append(params, cp.get("long"), clazz); // $time0 and $0
+					final CtClass consumerClass = clazz.makeNestedClass("$$cbw_" + uuid, true);
+					consumerClass.setInterfaces(new CtClass[] { cp.get(Consumer.class.getName()) });
+					final CtConstructor ctor = new CtConstructor(ctorParams, consumerClass);
+					final StringBuilder ctorBody = new StringBuilder();
+					ctorBody.append("{\n");
+					consumerClass.addField(new CtField(clazz, "obj", consumerClass));
+					ctorBody.append("    $0.time0 = $" + (params.length + 1) + ";");
+					consumerClass.addField(new CtField(CtClass.longType, "time0", consumerClass));
+					ctorBody.append("    $0.obj = $" + (params.length + 2) + ";");
+					for (int i = 0; i < params.length; ++i) {
+						final CtClass cbparam = params[i];
+						consumerClass.addField(new CtField(cbparam, "arg" + (i + 1), consumerClass));
+						ctorBody.append("    $0.arg" + (i + 1) + " = $" + (i + 1) + ";");
+					}
+					ctorBody.append("}\n");
+					ctor.setBody(ctorBody.toString());
+					consumerClass.addConstructor(ctor);
+
+					final CtClass[] cbparams = MoreArrays.append(method.getParameterTypes(), cp.get("long"), cp.get("java.lang.Object")); // $time0 and $0
+					final CtMethod acceptFn = new CtMethod(CtClass.voidType, "$$cb_" + uuid, cbparams, clazz);
+					if ((method.getModifiers() & Modifier.STATIC) > 0)
+						acceptFn.setModifiers(Modifier.STATIC);
+					final StringBuilder acceptBody = new StringBuilder();
+					acceptBody.append("{\n");
+					acceptBody.append("    final long $time0 = $" + (cbparams.length - 1) + ";\n");
+					acceptBody.append("    final java.lang.Object $_ = $" + (cbparams.length) + ";\n");
+					acceptBody.append(snippet.source);
+					acceptBody.append("}\n");
+					acceptFn.setBody(acceptBody.toString());
+					clazz.addMethod(acceptFn);
+
+					final CtMethod sam = new CtMethod(CtClass.voidType, "accept", new CtClass[] { cp.get("java.lang.Object") }, consumerClass);
+					final StringBuilder samBody = new StringBuilder();
+					samBody.append("{\n");
+					samBody.append("    $0.obj.$$cb_" + uuid + "(\n");
+					for (int i = 0; i < params.length; ++i) {
+						samBody.append("        $0.arg" + (i + 1) + ",\n");
+					}
+					samBody.append("        $0.time0,\n");
+					samBody.append("        $1\n");
+					samBody.append("    );\n");
+					samBody.append("}\n");
+					sam.setBody(samBody.toString());
+					consumerClass.addMethod(sam);
+					consumerClass.toClass();
+
+					afterBody.append("if ($_ != null) {\n");
+					afterBody.append("    $_.thenAccept(new " + clazz.getName() + ".$$cbw_" + uuid + "($$, " + (snippet.source.contains("$time0") ? "$time0" : "0L") + ", $0));\n");
+					afterBody.append("}\n");
+					break;
+				}
+				case ON_COMPLETABLE_FUTURE_EXCEPTION:
 					break;
 				default:
 					throw new RuntimeException("not implemented");
